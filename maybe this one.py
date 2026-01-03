@@ -2,9 +2,8 @@ import gurobipy as gp
 from gurobipy import GRB
 import numpy as np
 
-# -----------------------------
-# 1. Input Data (Small Example)
-# -----------------------------
+# 1. input data (from paper)
+
 num_groups = 2
 num_machines = 2
 bmax = 3
@@ -25,14 +24,12 @@ s = {
     (1, 0): [2, 1]
 }
 
-# -----------------------------
-# 2. Create Model
-# -----------------------------
+# 2. model
+
 model = gp.Model("FSDGS_Makespan_Min")
 
-# -----------------------------
-# 3. Variables
-# -----------------------------
+# 3. variables
+
 # W[i,p] = 1 if group p is assigned to slot i
 W = model.addVars(num_groups, num_groups, vtype=GRB.BINARY, name="W")
 
@@ -42,9 +39,8 @@ C = model.addVars(num_groups, num_machines, vtype=GRB.CONTINUOUS, name="C")
 # Cmax = makespan
 Cmax = model.addVar(vtype=GRB.CONTINUOUS, name="Cmax")
 
-# -----------------------------
-# 4. Constraints
-# -----------------------------
+# 4. constraints
+
 # Each group assigned to one slot
 for p in range(num_groups):
     model.addConstr(gp.quicksum(W[i, p] for i in range(num_groups)) == 1)
@@ -83,19 +79,16 @@ for i in range(num_groups):
     for k in range(num_machines):
         model.addConstr(Cmax >= C[i, k])
 
-# -----------------------------
-# 5. Objective
-# -----------------------------
+# 5. objective
+
 model.setObjective(Cmax, GRB.MINIMIZE)
 
-# -----------------------------
-# 6. Solve
-# -----------------------------
+# 6. solve
+
 model.optimize()
 
-# -----------------------------
 # 7. Output
-# -----------------------------
+
 if model.status == GRB.OPTIMAL:
     for v in model.getVars():
         if v.X > 0.5 or v.VarName.startswith("C") or v.VarName.startswith("Cmax"):
