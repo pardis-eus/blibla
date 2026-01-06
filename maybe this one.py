@@ -1,98 +1,129 @@
 import gurobipy as gp
 from gurobipy import GRB
-import numpy as np
 
-# 1. input data (from paper)
+# made up data
+g = 3                 # number of groups
+m = 3                 # number of machines
+bp = {1: 3, 2: 2, 3: 2}  # jobs per group (sums to 7) which are randomly assigned atm bc length of all jobs is 2
+bmax = max(bp.values())
 
-num_groups = 2
-num_machines = 2
-bmax = 3
+P = list(range(1, g + 1))     # real groups: 1..g
+I = list(range(1, g + 1))     # slots: 1..g
+K = list(range(1, m + 1))     # machines: 1..m
+J = list(range(1, bmax + 1))  # job index within a group (pad with dummy jobs)
 
-debug = True
+# processing times t[p,j,k] = 2 for real jobs, 0 for padded dummy jobs
+t = {(p, j, k): (2 if j <= bp[p] else 0) for p in P for j in J for k in K}
 
-bp = {0: 2, 1: 3}  # Number of jobs in each group (0-based indexing)
+# sequence-dependent setup times between groups S[p,l,k] = 1 for p!=l
+S = {(p, l, k): (1 if p != l else 0) for p in P for l in P for k in K}
 
-# Processing times: t[group][job][machine]
-t = {
-    0: {1: [3, 2], 2: [4, 1], 3: [0, 0]},
-    1: {1: [2, 3], 2: [3, 2], 3: [1, 4]}
-}
+# setup from "dummy start" group 0 to first group
+S0 = {(l, k): 1 for l in P for k in K}
 
-# Setup times between groups: s[from_group, to_group] = [M1_setup, M2_setup]
-s = {
-    (0, 1): [1, 2],
-    (1, 0): [2, 1]
-}
+# model ^-^
+model = gp.Model("flwgr")
 
-# 2. model
-
-model = gp.Model("FSDGS_Makespan_Min")
-
-# 3. variables
-
+# variables based on salmasi paper
 # W[i,p] = 1 if group p is assigned to slot i
-W = model.addVars(num_groups, num_groups, vtype=GRB.BINARY, name="W")
+W = model.addVars(I, P, vtype=GRB.BINARY, name="W")
 
-# C[i,k] = completion time of slot i on machine k
-C = model.addVars(num_groups, num_machines, vtype=GRB.CONTINUOUS, name="C")
+# A[i,p,l] = 1 if slot i has group p and slot i+1 has group l (transition)
+A = model.addVars(range(1, g), P, P, vtype=GRB.BINARY, name="A")  # i=1..g-1
 
-# Cmax = makespan
-Cmax = model.addVar(vtype=GRB.CONTINUOUS, name="Cmax")
+# O[i,k] = setup time before processing slot i on machine k
+O = model.addVars(I, K, vtype=GRB.CONTINUOUS, lb=0.0, name="O")
 
-# 4. constraints
+# X[i,j,k] = completion time of jth (padded) job of slot i on machine k
+X = model.addVars(I, J, K, vtype=GRB.CONTINUOUS, lb=0.0, name="X")
 
-# Each group assigned to one slot
-for p in range(num_groups):
-    model.addConstr(gp.quicksum(W[i, p] for i in range(num_groups)) == 1)
+# makespan
+Cmax = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name="Cmax")
 
-# Each slot gets one group
-for i in range(num_groups):
-    model.addConstr(gp.quicksum(W[i, p] for p in range(num_groups)) == 1)
+# constraints (before degree of freedom)
 
-# Add dummy processing time per group (sum of jobs)
-total_proc_time = {}
-for p in range(num_groups):
-    total_proc_time[p] = [sum(t[p][j][k] for j in range(1, bp[p]+1)) for k in range(num_machines)]
+# 1. each group assigned to exactly one slot
+for p in P:
+    model.addConstr(gp.quicksum(W[i, p] for i in I) == 1, name=f"assign_group_{p}")
 
-# Completion time constraints
-for i in range(num_groups):
-    for k in range(num_machines):
-        # Completion time at slot i, machine k is at least processing time of assigned group
-        expr = gp.quicksum(W[i, p] * total_proc_time[p][k] for p in range(num_groups))
+# 2. each slot gets exactly one group
+for i in I:
+    model.addConstr(gp.quicksum(W[i, p] for p in P) == 1, name=f"fill_slot_{i}")
 
-        if k == 0:
-            model.addConstr(C[i, k] >= expr)
-        else:
-            model.addConstr(C[i, k] >= C[i, k-1] + expr)
+# 3 4 5 6. linearize transitions A[i,p,l] = W[i,p] and W[i+1,l]
+for i in range(1, g):
+    for p in P:
+        for l in P:
+            model.addConstr(A[i, p, l] <= W[i, p], name=f"A_ub1_{i}_{p}_{l}")
+            model.addConstr(A[i, p, l] <= W[i+1, l], name=f"A_ub2_{i}_{p}_{l}")
+            model.addConstr(A[i, p, l] >= W[i, p] + W[i+1, l] - 1, name=f"A_lb_{i}_{p}_{l}")
 
-# Setup time constraints between slots (when group changes)
-for i in range(1, num_groups):
-    for p in range(num_groups):
-        for l in range(num_groups):
-            if p != l and (p, l) in s:
-                for k in range(num_machines):
-                    setup = s[p, l][k]
-                    model.addConstr(C[i, k] >= C[i-1, k] + setup * W[i-1, p] * W[i, l])
+# setup time before slot 1 (from dummy start)
+for k in K:
+    model.addConstr(
+        O[1, k] == gp.quicksum(S0[l, k] * W[1, l] for l in P),
+        name=f"setup_slot1_m{k}"
+    )
 
-# Makespan constraint
-for i in range(num_groups):
-    for k in range(num_machines):
-        model.addConstr(Cmax >= C[i, k])
+# setup time before slot i>1 (from previous slot group to current slot group)
+for i in range(2, g + 1):
+    for k in K:
+        model.addConstr(
+            O[i, k] == gp.quicksum(S[p, l, k] * A[i-1, p, l] for p in P for l in P),
+            name=f"setup_slot{i}_m{k}"
+        )
 
-# 5. objective
+# helper: processing time of the group assigned to slot i, job j, machine k
+def proc_expr(i, j, k):
+    return gp.quicksum(W[i, p] * t[p, j, k] for p in P)
 
+# 7 8 9 10 11. flowshop style completion time constraints with group setup before first job in each slot
+for i in I:
+    for k in K:
+        prev_slot_last = 0 if i == 1 else X[i-1, bmax, k]
+
+        model.addConstr(
+            X[i, 1, k] >= prev_slot_last + O[i, k] + proc_expr(i, 1, k),
+            name=f"firstjob_sameM_slot{i}_m{k}"
+        )
+
+        if k > 1:
+            model.addConstr(
+                X[i, 1, k] >= X[i, 1, k-1] + proc_expr(i, 1, k),
+                name=f"firstjob_prevM_slot{i}_m{k}"
+            )
+
+        for j in range(2, bmax + 1):
+            model.addConstr(
+                X[i, j, k] >= X[i, j-1, k] + proc_expr(i, j, k),
+                name=f"jobchain_sameM_slot{i}_j{j}_m{k}"
+            )
+            if k > 1:
+                model.addConstr(
+                    X[i, j, k] >= X[i, j, k-1] + proc_expr(i, j, k),
+                    name=f"jobchain_prevM_slot{i}_j{j}_m{k}"
+                )
+
+# makespan definition
+for k in K:
+    model.addConstr(Cmax >= X[g, bmax, k], name=f"cmax_m{k}")
+
+# objective
 model.setObjective(Cmax, GRB.MINIMIZE)
 
-# 6. solve
-
+# solve ):
 model.optimize()
 
-# 7. Output
-
+# output ):
 if model.status == GRB.OPTIMAL:
-    for v in model.getVars():
-        if v.X > 0.5 or v.VarName.startswith("C") or v.VarName.startswith("Cmax"):
-            print(f"{v.VarName} = {v.X:.2f}")
-    print("\nOptimal makespan:", model.ObjVal)
+    print(f"\nOptimal makespan (Cmax) = {Cmax.X:.2f}\n")
+
+    seq = {}
+    for i in I:
+        for p in P:
+            if W[i, p].X > 0.5:
+                seq[i] = p
+    print("Group sequence (slot -> group):", seq)
 else:
     print("No optimal solution found.")
+    
