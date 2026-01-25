@@ -35,9 +35,9 @@ Jpos = list(range(1, bmax + 1))  # positions inside group on a machine: 1..bmax
 
 # Colors per group for plotting
 group_colors = {
-    1: "tab:blue",
+    1: "tab:purple",
     2: "tab:red",
-    3: "tab:green",
+    3: "tab:pink",
 }
 
 
@@ -206,7 +206,7 @@ ax.set_yticks(list(range(m)))
 ax.set_yticklabels([f"Machine {k}" for k in K])
 ax.set_xlabel("Time")
 ax.set_ylabel("Machines")
-ax.set_title("Schedule (Group order + internal sequencing decided by model)")
+ax.set_title("Schedule (group order and internal job order)")
 ax.grid(True, axis="x")
 
 # Legend for groups
