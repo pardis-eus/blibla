@@ -1,217 +1,234 @@
 import gurobipy as gp
 from gurobipy import GRB
-import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
 
 # made up data
 g = 3
 m = 3
-P = [1, 2, 3]          # groups
-I = [1, 2, 3]          # slots
-K = [1, 2, 3]          # machines
+P = [1, 2, 3]
+I = [1, 2, 3]
+K = [1, 2, 3]
+P0 = [0] + P
 
-# Processing times per machine for job IDs 1..7
 pt = {
-    1: {1: 1, 2: 1, 3: 3, 4: 1, 5: 3, 6: 1, 7: 2},  # machine 1
-    2: {1: 1, 2: 1, 3: 1, 4: 1, 5: 4, 6: 5, 7: 3},  # machine 2
-    3: {1: 1, 2: 1, 3: 4, 4: 1, 5: 2, 6: 1, 7: 1},  # machine 3
+    1: {1: 1, 2: 1, 3: 3, 4: 1, 5: 3, 6: 1, 7: 2},
+    2: {1: 1, 2: 1, 3: 1, 4: 1, 5: 4, 6: 5, 7: 3},
+    3: {1: 1, 2: 1, 3: 4, 4: 1, 5: 2, 6: 1, 7: 1},
 }
 
-# Group 1: jobs {1,2} on every machine
-# Group 2: jobs {3,4,5} on every machine
-# Group 3: jobs {6,7} on every machine
-jobs_in_group = {
-    1: {1: [1, 2],     2: [1, 2],     3: [1, 2]},
-    2: {1: [3, 4, 5],  2: [3, 4, 5],  3: [3, 4, 5]},
-    3: {1: [6, 7],     2: [6, 7],     3: [6, 7]},
+# Group 1: jobs {1,2}
+# Group 2: jobs {3,4,5}
+# Group 3: jobs {6,7}
+group_jobs = {
+    1: [1, 2],
+    2: [3, 4, 5],
+    3: [6, 7],
 }
 
-# setup time: 1 before each group on each machine (no setup inside group)
-setup = {(p, k): 1 for p in P for k in K}
+# setup time: 1 before each group (converted to sequence form)
+setup_simple = {(p, k): 1 for p in P for k in K}
+setup = {(p_prev, p_next, k): setup_simple[p_next, k] for p_prev in P0 for p_next in P for k in K}
 
-# max number of jobs in any group on any machine (here = 3)
-bmax = max(len(jobs_in_group[p][k]) for p in P for k in K)
-Jpos = list(range(1, bmax + 1))  # positions inside group on a machine: 1..bmax
+bmax = max(len(group_jobs[p]) for p in P)
+J = list(range(1, bmax + 1))
 
-# Colors per group for plotting
+# padding with dummy jobs
+t = {}
+tprime = {}
+job_label = {}
+padded_jobs = {}
+
+sum_all_proc = sum(pt[k][a] for k in K for a in pt[k])
+sum_all_setup = sum(setup[p_prev, p_next, k] for p_prev in P0 for p_next in P for k in K)
+M = sum_all_proc + sum_all_setup + 100
+
+for p in P:
+    real = list(group_jobs[p])
+    padded_jobs[p] = real + [None] * (bmax - len(real))
+
+for p in P:
+    for j in J:
+        a = padded_jobs[p][j - 1]
+        if a is None:
+            job_label[p, j] = "DUMMY"
+            for k in K:
+                t[p, j, k] = 0
+                tprime[p, j, k] = -M
+        else:
+            job_label[p, j] = a
+            for k in K:
+                t[p, j, k] = pt[k][a]
+                tprime[p, j, k] = pt[k][a]
+
+T = {(p, k): sum(t[p, j, k] for j in J) for p in P for k in K}
+
+# model
+model = gp.Model("flwgr")
+
+W = model.addVars(I, P, vtype=GRB.BINARY, name="W")
+A = model.addVars(range(0, g), P0, P, vtype=GRB.BINARY, name="A")
+Y = model.addVars([(i, j, q) for i in I for j in J for q in J if j < q],
+                  vtype=GRB.BINARY, name="Y")
+X = model.addVars(I, J, K, lb=0.0, vtype=GRB.CONTINUOUS, name="X")
+C = model.addVars(I, K, lb=0.0, vtype=GRB.CONTINUOUS, name="C")
+O = model.addVars(I, K, lb=0.0, vtype=GRB.CONTINUOUS, name="O")
+
+model.setObjective(C[g, m], GRB.MINIMIZE)
+
+# group assignment
+for p in P:
+    model.addConstr(gp.quicksum(W[i, p] for i in I) == 1)
+
+for i in I:
+    model.addConstr(gp.quicksum(W[i, p] for p in P) == 1)
+
+# adjacency
+for i in range(0, g):
+    model.addConstr(gp.quicksum(A[i, p, l] for p in P0 for l in P if l != p) == 1)
+
+for l in P:
+    model.addConstr(A[0, 0, l] <= W[1, l])
+    model.addConstr(A[0, 0, l] >= W[1, l])
+
+for i in range(1, g):
+    for p in P:
+        for l in P:
+            if l != p:
+                model.addConstr(A[i, p, l] <= W[i, p])
+                model.addConstr(A[i, p, l] <= W[i + 1, l])
+                model.addConstr(A[i, p, l] >= W[i, p] + W[i + 1, l] - 1)
+
+for i in range(0, g):
+    for p in P0:
+        for l in P:
+            if p == l or (i == 0 and p != 0):
+                model.addConstr(A[i, p, l] == 0)
+
+# setup
+for i in I:
+    for k in K:
+        model.addConstr(
+            O[i, k] == gp.quicksum(A[i - 1, p, l] * setup[p, l, k]
+                                  for p in P0 for l in P if l != p)
+        )
+
+# completion machine 1
+for i in I:
+    prev = 0 if i == 1 else C[i - 1, 1]
+    model.addConstr(
+        C[i, 1] == prev + O[i, 1] + gp.quicksum(W[i, p] * T[p, 1] for p in P)
+    )
+
+# job timing
+for i in I:
+    for j in J:
+        for k in K:
+            prevC = 0 if i == 1 else C[i - 1, k]
+            model.addConstr(
+                X[i, j, k] >= prevC + O[i, k] +
+                gp.quicksum(W[i, p] * tprime[p, j, k] for p in P)
+            )
+
+# sequencing inside group
+for i in I:
+    for j in J:
+        for q in J:
+            if j < q:
+                for k in K:
+                    rhs_j = gp.quicksum(W[i, p] * tprime[p, j, k] for p in P)
+                    rhs_q = gp.quicksum(W[i, p] * tprime[p, q, k] for p in P)
+
+                    model.addConstr(X[i, j, k] - X[i, q, k] + M * Y[i, j, q] >= rhs_j)
+                    model.addConstr(X[i, q, k] - X[i, j, k] + M * (1 - Y[i, j, q]) >= rhs_q)
+
+# flow shop
+for i in I:
+    for j in J:
+        for k in K:
+            if k >= 2:
+                model.addConstr(
+                    X[i, j, k] - X[i, j, k - 1] >=
+                    gp.quicksum(W[i, p] * t[p, j, k] for p in P)
+                )
+
+# slot completion
+for i in I:
+    for k in K:
+        for j in J:
+            model.addConstr(C[i, k] >= X[i, j, k])
+
+model.optimize()
+
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
+
+if model.status != GRB.OPTIMAL:
+    print("No optimal solution")
+    exit()
+
+print(f"\nOptimal makespan = {C[g,m].X:.2f}")
+
+# find group order
+seq = {}
+for i in I:
+    for p in P:
+        if W[i,p].X > 0.5:
+            seq[i] = p
+            break
+
+print("Group order:", seq)
+
+# colors
 group_colors = {
     1: "tab:purple",
     2: "tab:red",
     3: "tab:pink",
 }
 
-
-# model
-model = gp.Model("flwgr")
-
-# W[i,p] = 1 if group p is assigned to slot i
-W = model.addVars(I, P, vtype=GRB.BINARY, name="W")
-
-# Z[i,p,k,a,j] = 1 if (when group p is in slot i) job a (on machine k) is assigned to position j within that group on that machine.
-Z = {}
-for i in I:
-    for p in P:
-        for k in K:
-            for a in jobs_in_group[p][k]:
-                for j in Jpos:
-                    Z[i, p, k, a, j] = model.addVar(vtype=GRB.BINARY, name=f"Z[{i},{p},{k},{a},{j}]")
-
-# X[i,j,k] = completion time of position j in slot i on machine k
-X = model.addVars(I, Jpos, K, vtype=GRB.CONTINUOUS, lb=0.0, name="X")
-
-# makespan
-Cmax = model.addVar(vtype=GRB.CONTINUOUS, lb=0.0, name="Cmax")
-
-
-# group assignment constraints
-for p in P:
-    model.addConstr(gp.quicksum(W[i, p] for i in I) == 1, name=f"assign_group_{p}")
-
-for i in I:
-    model.addConstr(gp.quicksum(W[i, p] for p in P) == 1, name=f"fill_slot_{i}")
-
-
-# internal sequencing constraints
-for i in I:
-    for p in P:
-        for k in K:
-            jobs_pk = jobs_in_group[p][k]
-            n_jobs = len(jobs_pk)
-
-            # each real job appears in exactly one position if W[i,p]=1 (else 0)
-            for a in jobs_pk:
-                model.addConstr(
-                    gp.quicksum(Z[i, p, k, a, j] for j in Jpos) == W[i, p],
-                    name=f"job_once_i{i}_p{p}_k{k}_a{a}"
-                )
-
-            # each position has at most one job if W[i,p]=1 (can be empty if fewer than bmax jobs)
-            for j in Jpos:
-                model.addConstr(
-                    gp.quicksum(Z[i, p, k, a, j] for a in jobs_pk) <= W[i, p],
-                    name=f"pos_cap_i{i}_p{p}_k{k}_j{j}"
-                )
-
-            # exactly n_jobs assigned if group is selected in that slot
-            model.addConstr(
-                gp.quicksum(Z[i, p, k, a, j] for a in jobs_pk for j in Jpos) == n_jobs * W[i, p],
-                name=f"count_i{i}_p{p}_k{k}"
-            )
-
-# helper: processing time expression at (slot i, machine k, position j)
-def proc_pos_expr(i, k, j):
-    expr = gp.LinExpr()
-    for p in P:
-        for a in jobs_in_group[p][k]:
-            expr += pt[k][a] * Z[i, p, k, a, j]
-    return expr
-
-# helper: setup time before slot i on machine k (depends on which group is in slot i)
-def setup_expr(i, k):
-    return gp.quicksum(setup[p, k] * W[i, p] for p in P)
-
-# completion time constraints (per machine timeline)
-for k in K:
-    for i in I:
-        prev_slot_last = 0 if i == 1 else X[i - 1, bmax, k]
-
-        # first position in slot i
-        model.addConstr(
-            X[i, 1, k] >= prev_slot_last + setup_expr(i, k) + proc_pos_expr(i, k, 1),
-            name=f"firstpos_i{i}_k{k}"
-        )
-
-        # chain positions within slot i
-        for j in range(2, bmax + 1):
-            model.addConstr(
-                X[i, j, k] >= X[i, j - 1, k] + proc_pos_expr(i, k, j),
-                name=f"chain_i{i}_k{k}_j{j}"
-            )
-
-# makespan definition
-for k in K:
-    model.addConstr(Cmax >= X[g, bmax, k], name=f"Cmax_k{k}")
-
-model.setObjective(Cmax, GRB.MINIMIZE)
-
-# 3) solve
-model.optimize()
-
-if model.status != GRB.OPTIMAL:
-    print("No optimal solution found. Status:", model.status)
-    raise SystemExit
-
-print(f"\nOptimal makespan (Cmax) = {Cmax.X:.2f}")
-
-# extract group order
-seq = {}
-for i in I:
-    for p in P:
-        if W[i, p].X > 0.5:
-            seq[i] = p
-            break
-print("Group order (slot -> group):", seq)
-
-# 4) BUILD SCHEDULE FOR PLOTTING
-# bars entries: (machine_index0, start, dur, label, group)
 bars = []
 
+# build schedule
 for k in K:
     for i in I:
         p = seq[i]
 
-        for j in Jpos:
-            chosen_a = None
-            for a in jobs_in_group[p][k]:
-                if Z[i, p, k, a, j].X > 0.5:
-                    chosen_a = a
-                    break
+        # sort jobs by completion time on machine k
+        jobs_sorted = []
+        for j in J:
+            label = job_label[p, j]
+            if label == "DUMMY":
+                continue
+            jobs_sorted.append((j, label, X[i,j,k].X))
 
-            if chosen_a is None:
-                continue  # empty position
+        jobs_sorted.sort(key=lambda x: x[2])  # sort by completion time
 
-            dur = pt[k][chosen_a]
-            end_time = X[i, j, k].X
-            start_time = end_time - dur
-            label = f"j{chosen_a}{k}"  # job a on machine k
+        for j, a, end_time in jobs_sorted:
+            dur = pt[k][a]
+            start = end_time - dur
+            label = f"j{a}"
 
-            bars.append((k - 1, start_time, dur, label, p))
+            bars.append((k-1, start, dur, label, p))
 
-
-# 5) stupid gantt chart
-fig, ax = plt.subplots(figsize=(12, 2 + 0.8 * m))
+# plot
+fig, ax = plt.subplots(figsize=(12, 2 + 0.8*m))
 bar_height = 0.6
 
-for machine_idx0, start, dur, label, group in bars:
-    ax.barh(
-        y=machine_idx0,
-        width=dur,
-        left=start,
-        height=bar_height,
-        align="center",
-        edgecolor="black",
-        color=group_colors.get(group, "gray"),
-    )
-    ax.text(
-        x=start + dur / 2,
-        y=machine_idx0,
-        s=label,
-        ha="center",
-        va="center",
-        fontsize=9,
-        color="black",
-    )
+for machine, start, dur, label, group in bars:
+    ax.barh(machine, dur, left=start,
+            height=bar_height,
+            color=group_colors[group],
+            edgecolor="black")
 
-ax.set_yticks(list(range(m)))
+    ax.text(start + dur/2, machine, label,
+            ha="center", va="center", fontsize=9)
+
+ax.set_yticks(range(m))
 ax.set_yticklabels([f"Machine {k}" for k in K])
 ax.set_xlabel("Time")
-ax.set_ylabel("Machines")
-ax.set_title("Schedule (group order and internal job order)")
+ax.set_title("Flowshop Schedule")
 ax.grid(True, axis="x")
 
-# Legend for groups
-legend_patches = [Patch(color=group_colors[p], label=f"Group {p}") for p in P]
-ax.legend(handles=legend_patches, loc="upper right")
+legend = [Patch(color=group_colors[p], label=f"Group {p}") for p in P]
+ax.legend(handles=legend)
 
 plt.tight_layout()
 plt.show()
