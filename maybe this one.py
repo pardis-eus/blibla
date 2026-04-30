@@ -4,16 +4,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.patches import Patch
 
-# =========================
-# READ DATA FROM EXCEL
-# =========================
-excel_file = "your_excel_file.xlsx"   # change this to your Excel file name
+# excel data
 
-pt_df = pd.read_excel(excel_file, sheet_name="ProcessingTimes")
-groups_df = pd.read_excel(excel_file, sheet_name="Groups")
-setup_df = pd.read_excel(excel_file, sheet_name="Setup")
+excel_file = "excel_file.xlsx" 
 
-# Sets
+pt_df = pd.read_excel(excel_file, sheet1="ProcessingTimes")
+groups_df = pd.read_excel(excel_file, sheet2="Groups")
+setup_df = pd.read_excel(excel_file, sheet3="Setup")
+
+# sets
 P = sorted(groups_df["group"].unique().tolist())
 K = sorted(pt_df["machine"].unique().tolist())
 
@@ -23,7 +22,7 @@ m = len(K)
 I = list(range(1, g + 1))
 P0 = [0] + P
 
-# Processing times: pt[machine][job]
+# processing times: pt[machine][job]
 pt = {k: {} for k in K}
 
 for _, row in pt_df.iterrows():
@@ -32,14 +31,14 @@ for _, row in pt_df.iterrows():
     time = float(row["time"])
     pt[k][a] = time
 
-# Group jobs: group_jobs[group] = [jobs]
+# group jobs: group_jobs[group] = [jobs]
 group_jobs = {}
 
 for p in P:
     jobs = groups_df[groups_df["group"] == p]["job"].tolist()
     group_jobs[p] = [int(j) for j in jobs]
 
-# Simple setup time: setup_simple[group, machine]
+# simple setup time: setup_simple[group, machine]
 setup_simple = {}
 
 for _, row in setup_df.iterrows():
@@ -47,7 +46,7 @@ for _, row in setup_df.iterrows():
     k = int(row["machine"])
     setup_simple[p, k] = float(row["setup"])
 
-# Convert setup to sequence form
+# convert setup to sequence form
 setup = {
     (p_prev, p_next, k): setup_simple[p_next, k]
     for p_prev in P0
@@ -55,9 +54,9 @@ setup = {
     for k in K
 }
 
-# =========================
-# PREPARE MODEL DATA
-# =========================
+
+# prepare model data
+
 bmax = max(len(group_jobs[p]) for p in P)
 J = list(range(1, bmax + 1))
 
@@ -91,9 +90,9 @@ for p in P:
 
 T = {(p, k): sum(t[p, j, k] for j in J) for p in P for k in K}
 
-# =========================
-# MODEL
-# =========================
+
+# model
+
 model = gp.Model("flwgr")
 
 W = model.addVars(I, P, vtype=GRB.BINARY, name="W")
@@ -111,30 +110,28 @@ O = model.addVars(I, K, lb=0.0, vtype=GRB.CONTINUOUS, name="O")
 
 model.setObjective(C[g, m], GRB.MINIMIZE)
 
-# =========================
-# CONSTRAINTS
-# =========================
+# constraints
 
-# Each group assigned once
+# each group assigned once
 for p in P:
     model.addConstr(gp.quicksum(W[i, p] for i in I) == 1)
 
-# Each slot has one group
+# each slot has one group
 for i in I:
     model.addConstr(gp.quicksum(W[i, p] for p in P) == 1)
 
-# Adjacency
+# adjacency
 for i in range(0, g):
     model.addConstr(
         gp.quicksum(A[i, p, l] for p in P0 for l in P if l != p) == 1
     )
 
-# First slot comes from dummy group 0
+# first slot comes from dummy group 0
 for l in P:
     model.addConstr(A[0, 0, l] <= W[1, l])
     model.addConstr(A[0, 0, l] >= W[1, l])
 
-# Transitions between real groups
+# transitions between real groups
 for i in range(1, g):
     for p in P:
         for l in P:
@@ -143,14 +140,14 @@ for i in range(1, g):
                 model.addConstr(A[i, p, l] <= W[i + 1, l])
                 model.addConstr(A[i, p, l] >= W[i, p] + W[i + 1, l] - 1)
 
-# Invalid transitions
+# invalid transitions
 for i in range(0, g):
     for p in P0:
         for l in P:
             if p == l or (i == 0 and p != 0):
                 model.addConstr(A[i, p, l] == 0)
 
-# Setup time
+# setup time
 for i in I:
     for k in K:
         model.addConstr(
@@ -162,7 +159,7 @@ for i in I:
             )
         )
 
-# Completion on machine 1
+# completion on machine 1
 first_machine = K[0]
 
 for i in I:
@@ -173,7 +170,7 @@ for i in I:
         gp.quicksum(W[i, p] * T[p, first_machine] for p in P)
     )
 
-# Job timing
+# job timing
 for i in I:
     for j in J:
         for k in K:
@@ -183,7 +180,7 @@ for i in I:
                 gp.quicksum(W[i, p] * tprime[p, j, k] for p in P)
             )
 
-# Sequencing inside group
+# sequencing inside group
 for i in I:
     for j in J:
         for q in J:
@@ -199,7 +196,7 @@ for i in I:
                         X[i, q, k] - X[i, j, k] + M * (1 - Y[i, j, q]) >= rhs_q
                     )
 
-# Flowshop constraints
+# flowshop constraints
 for i in I:
     for j in J:
         for k_index in range(1, len(K)):
@@ -211,15 +208,15 @@ for i in I:
                 gp.quicksum(W[i, p] * t[p, j, k] for p in P)
             )
 
-# Slot completion
+# slot completion
 for i in I:
     for k in K:
         for j in J:
             model.addConstr(C[i, k] >= X[i, j, k])
 
-# =========================
-# SOLVE
-# =========================
+
+# solve hopefully
+
 model.optimize()
 
 if model.status != GRB.OPTIMAL:
@@ -228,9 +225,9 @@ if model.status != GRB.OPTIMAL:
 
 print(f"\nOptimal makespan = {C[g, m].X:.2f}")
 
-# =========================
-# OUTPUT
-# =========================
+
+# output
+
 seq = {}
 
 for i in I:
@@ -241,9 +238,9 @@ for i in I:
 
 print("Group order:", seq)
 
-# =========================
-# PLOT
-# =========================
+
+# plot
+
 default_colors = [
     "tab:purple",
     "tab:red",
