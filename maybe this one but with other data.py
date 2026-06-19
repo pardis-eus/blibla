@@ -137,3 +137,159 @@ T = {
     for p in P
     for k in K
 }
+
+# =========================
+# SALMASI-STYLE MILP MODEL
+# =========================
+model = gp.Model("Salmasi_with_Schaller_data")
+
+W = model.addVars(I, P, vtype=GRB.BINARY, name="W")
+A = model.addVars(range(0, g), P0, P, vtype=GRB.BINARY, name="A")
+
+Y = model.addVars(
+    [(i, j, q) for i in I for j in J for q in J if j < q],
+    vtype=GRB.BINARY,
+    name="Y"
+)
+
+X = model.addVars(I, J, K, lb=0.0, vtype=GRB.CONTINUOUS, name="X")
+C = model.addVars(I, K, lb=0.0, vtype=GRB.CONTINUOUS, name="C")
+O = model.addVars(I, K, lb=0.0, vtype=GRB.CONTINUOUS, name="O")
+
+model.setObjective(C[g, m], GRB.MINIMIZE)
+
+# each group assigned once
+for p in P:
+    model.addConstr(gp.quicksum(W[i, p] for i in I) == 1)
+
+# each slot has one group
+for i in I:
+    model.addConstr(gp.quicksum(W[i, p] for p in P) == 1)
+
+# one active transition
+for i in range(0, g):
+    model.addConstr(
+        gp.quicksum(A[i, p, l] for p in P0 for l in P if l != p) == 1
+    )
+
+# first transition: dummy group 0 -> first family
+for l in P:
+    model.addConstr(A[0, 0, l] == W[1, l])
+
+# real transitions
+for i in range(1, g):
+    for p in P:
+        for l in P:
+            if p != l:
+                model.addConstr(A[i, p, l] <= W[i, p])
+                model.addConstr(A[i, p, l] <= W[i + 1, l])
+                model.addConstr(A[i, p, l] >= W[i, p] + W[i + 1, l] - 1)
+
+# invalid transitions
+for i in range(0, g):
+    for p in P0:
+        for l in P:
+            if p == l or (i == 0 and p != 0):
+                model.addConstr(A[i, p, l] == 0)
+
+# setup time
+for i in I:
+    for k in K:
+        model.addConstr(
+            O[i, k] == gp.quicksum(
+                A[i - 1, p, l] * setup[p, l, k]
+                for p in P0
+                for l in P
+                if p != l
+            )
+        )
+
+# completion on first machine
+for i in I:
+    prev = 0 if i == 1 else C[i - 1, 1]
+    model.addConstr(
+        C[i, 1] ==
+        prev + O[i, 1] + gp.quicksum(W[i, p] * T[p, 1] for p in P)
+    )
+
+# job timing
+for i in I:
+    for j in J:
+        for k in K:
+            prevC = 0 if i == 1 else C[i - 1, k]
+            model.addConstr(
+                X[i, j, k] >=
+                prevC + O[i, k] +
+                gp.quicksum(W[i, p] * tprime[p, j, k] for p in P)
+            )
+
+# sequencing inside group
+for i in I:
+    for j in J:
+        for q in J:
+            if j < q:
+                for k in K:
+                    rhs_j = gp.quicksum(W[i, p] * tprime[p, j, k] for p in P)
+                    rhs_q = gp.quicksum(W[i, p] * tprime[p, q, k] for p in P)
+
+                    model.addConstr(
+                        X[i, j, k] - X[i, q, k] + M * Y[i, j, q] >= rhs_j
+                    )
+
+                    model.addConstr(
+                        X[i, q, k] - X[i, j, k] + M * (1 - Y[i, j, q]) >= rhs_q
+                    )
+
+# flowshop constraints
+for i in I:
+    for j in J:
+        for k in K:
+            if k >= 2:
+                model.addConstr(
+                    X[i, j, k] - X[i, j, k - 1] >=
+                    gp.quicksum(W[i, p] * t[p, j, k] for p in P)
+                )
+
+# slot completion
+for i in I:
+    for k in K:
+        for j in J:
+            model.addConstr(C[i, k] >= X[i, j, k])
+
+# =========================
+# SOLVE
+# =========================
+model.optimize()
+
+if model.status != GRB.OPTIMAL:
+    print("No optimal solution found")
+    print("Status:", model.status)
+    exit()
+
+print(f"\nInstance: {folder}/{instance}")
+print(f"Optimal makespan = {C[g, m].X:.2f}")
+
+seq = {}
+
+for i in I:
+    for p in P:
+        if W[i, p].X > 0.5:
+            seq[i] = p
+            break
+
+print("Group order:", seq)
+
+print("\nJob order inside each selected group:")
+for i in I:
+    p = seq[i]
+    jobs_sorted = []
+
+    for j in J:
+        if job_label[p, j] == "DUMMY":
+            continue
+        jobs_sorted.append((job_label[p, j], X[i, j, m].X))
+
+    jobs_sorted.sort(key=lambda x: x[1])
+    order = [job for job, _ in jobs_sorted]
+
+    print(f"Slot {i}, Group {p}: {order}")
