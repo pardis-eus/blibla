@@ -1,7 +1,8 @@
 import zipfile
 import gurobipy as gp
 from gurobipy import GRB
-
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 # =========================
 # SETTINGS
 # =========================
@@ -259,15 +260,27 @@ for i in I:
 # =========================
 # SOLVE
 # =========================
+# stop after 30 minutes
+model.setParam("TimeLimit", 1800)
+
+# stop earlier if within 1% of optimal
+model.setParam("MIPGap", 0.01)
+
 model.optimize()
 
-if model.status != GRB.OPTIMAL:
-    print("No optimal solution found")
+if model.SolCount == 0:
+    print("No feasible solution found")
     print("Status:", model.status)
     exit()
 
 print(f"\nInstance: {folder}/{instance}")
-print(f"Optimal makespan = {C[g, m].X:.2f}")
+print(f"Best makespan found = {model.ObjVal:.2f}")
+
+if model.status == GRB.OPTIMAL:
+    print("Optimal solution proven.")
+else:
+    print(f"Optimality gap = {100 * model.MIPGap:.2f}%")
+    print("Solution is feasible but not proven optimal.")
 
 seq = {}
 
@@ -293,3 +306,83 @@ for i in I:
     order = [job for job, _ in jobs_sorted]
 
     print(f"Slot {i}, Group {p}: {order}")
+
+    # =========================
+# GANTT CHART
+# =========================
+group_colors = {
+    1: "tab:purple",
+    2: "tab:red",
+    3: "tab:pink",
+    4: "tab:blue",
+    5: "tab:green",
+    6: "tab:orange",
+    7: "tab:brown",
+    8: "tab:cyan",
+    9: "tab:olive",
+    10: "tab:gray",
+}
+
+bars = []
+
+for k in K:
+    for i in I:
+        p = seq[i]
+
+        jobs_sorted = []
+
+        for j in J:
+            if job_label[p, j] == "DUMMY":
+                continue
+
+            end_time = X[i, j, k].X
+            jobs_sorted.append((j, job_label[p, j], end_time))
+
+        jobs_sorted.sort(key=lambda x: x[2])
+
+        for j, real_job, end_time in jobs_sorted:
+            duration = t[p, j, k]
+            start_time = end_time - duration
+            label = f"j{real_job}"
+
+            bars.append((k - 1, start_time, duration, label, p))
+
+fig, ax = plt.subplots(figsize=(14, 2 + 0.8 * m))
+bar_height = 0.6
+
+for machine, start, duration, label, group in bars:
+    ax.barh(
+        machine,
+        duration,
+        left=start,
+        height=bar_height,
+        color=group_colors[group],
+        edgecolor="black"
+    )
+
+    ax.text(
+        start + duration / 2,
+        machine,
+        label,
+        ha="center",
+        va="center",
+        fontsize=8,
+        color="black"
+    )
+
+ax.set_yticks(range(m))
+ax.set_yticklabels([f"Machine {k}" for k in K])
+ax.set_xlabel("Time")
+ax.set_ylabel("Machines")
+ax.set_title(f"Gantt Chart - {folder}/{instance}")
+ax.grid(True, axis="x")
+
+legend = [
+    Patch(color=group_colors[p], label=f"Group {p}")
+    for p in P
+]
+
+ax.legend(handles=legend, loc="upper right")
+
+plt.tight_layout()
+plt.show()
